@@ -4,10 +4,15 @@ from torch.nn import functional as F
 
 # -------------
 
-batch_size = 4
+batch_size = 32
 block_size = 8
 embed_size = 32
 hidden_size = 64
+learning_rate = 0.001
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+max_iters = 3000
+eval_interval = 50
+eval_iters = 200
 
 # -------------
 
@@ -73,21 +78,45 @@ def get_batch(split):
     rand_nums = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i+block_size] for i in rand_nums])
     y = torch.stack([data[i+1:i+block_size+1] for i in rand_nums])
+    x, y = x.to(device), y.to(device)
     return x, y
 
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            logits, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+
 model = RNNLanguageModel(vocab_size=vocab_size, embed_size=embed_size, hidden_size=hidden_size)
+model = model.to(device)
 
-xb, yb = get_batch('train')
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-for batch_dimension in range(batch_size):
-    for time_dimension in range(block_size):
-        context = xb[batch_dimension, :time_dimension+1]
-        target = yb[batch_dimension, :time_dimension]
+for iter in range(max_iters):
+    if iter % eval_interval == 0:
+        losses = estimate_loss()
+        print(f"Step {iter}: Train loss {losses['train']:.4f}, Val loss {losses['val']:.4f}")
+    
+    xb, yb = get_batch('train')
+
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
 
 # Forward pass (logits and loss)
-logits, loss = model(xb, yb)
 print(f"Logits shape: {logits.shape}, Loss: {loss.item()}")
 
-# Generate text
+# Generate text from the model
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
 generated_idx = model.generate(idx=torch.zeros((1, 1), dtype=torch.long), max_new_tokens=500)
 print(decode(generated_idx[0].tolist()))
