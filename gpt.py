@@ -5,16 +5,16 @@ from torch.nn import functional as F
 # -------------
 
 batch_size = 32
-block_size = 8
-num_embed = 32
+block_size = 256
+num_embed = 384
+max_iters = 5000
 learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-max_iters = 3000
-eval_interval = 50
+eval_interval = 500
 eval_iters = 200
-num_head = 4
-num_layer = 4
+num_head = 6
+num_layer = 6
 dropout = 0.2
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # -------------
 
