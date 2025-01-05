@@ -69,6 +69,16 @@ class Head(nn.Module):
         out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
         return out
 
+class MultiHeadAttention(nn.Module):
+    """ Multiple heads of self-attention in parallel """
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+
 
 class RNNLanguageModel(nn.Module):
     def __init__(self, num_layers=1):
@@ -77,7 +87,7 @@ class RNNLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(block_size, embed_size)
         self.rnn = nn.LSTM(embed_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, vocab_size)
-        self.sa_head = Head(embed_size)
+        self.sa_heads = MultiHeadAttention(4, embed_size//4) # 4 heads of 8-dimensional self-attention = 32 (embed_size)
         self.lm_head = nn.Linear(embed_size, vocab_size)
     
     def forward(self, idx, targets=None):
@@ -87,7 +97,7 @@ class RNNLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T, C)
         x = tok_emb + pos_emb # (B, T, C)
 
-        attn_out = self.sa_head(x)
+        attn_out = self.sa_heads(x)
         x = x + attn_out
         output, _ = self.rnn(x)
         
