@@ -43,16 +43,54 @@ n = int(0.9 * len(data))
 train_data = data[:n]
 val_data = data[n:]
 
-class RNNLanguageModel(nn.Module):
-    def __init__(self, vocab_size, embed_size, hidden_size, num_layers=1):
+class Head(nn.Module):
+    """ One head of self-attention """
+
+    # Each token emits 3 vectors: a key, a query, and a value
+    def __init__(self, head_size):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.key = nn.Linear(embed_size, head_size, bias=False)
+        self.query = nn.Linear(embed_size, head_size, bias=False)
+        self.value = nn.Linear(embed_size, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # Lower-triangular matrix
+
+    def forward(self, x):
+        B,T,C = x.shape
+        k = self.key(x)     # (B,T,C)
+        q = self.query(x)   # (B,T,C)
+
+        # Compute attention scores ("affinities")
+        wei = q @ k.transpose(-2,-1) * C**-0.5  # (B, T, C) @ (B, C, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        wei = F.softmax(wei, dim=-1) # (B, T, T)
+        
+        # Perform the weighted aggregation of the values
+        v = self.value(x) # (B,T,C)
+        out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
+        return out
+
+
+class RNNLanguageModel(nn.Module):
+    def __init__(self, num_layers=1):
+        super().__init__()
+        self.token_embedding_table = nn.Embedding(vocab_size, embed_size)
+        self.position_embedding_table = nn.Embedding(block_size, embed_size)
         self.rnn = nn.LSTM(embed_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, vocab_size)
+        self.sa_head = Head(embed_size)
+        self.lm_head = nn.Linear(embed_size, vocab_size)
     
     def forward(self, idx, targets=None):
-        x = self.embedding(idx) # (B, T, embed_size)
+        B, T = idx.shape
+
+        tok_emb = self.token_embedding_table(idx) # (B, T, embed_size)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T, C)
+        x = tok_emb + pos_emb # (B, T, C)
+
+        attn_out = self.sa_head(x)
+        x = x + attn_out
         output, _ = self.rnn(x)
+        
         logits = self.fc(output) # (B, T, vocab_size)
 
         loss = None
@@ -65,8 +103,8 @@ class RNNLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         hidden = None
         for _ in range(max_new_tokens):
-            x = self.embedding(idx[:, -1:])
-            output, hidden = self.rnn(x, hidden)
+            token_embeddings = self.token_embedding_table(idx[:, -block_size:])
+            output, hidden = self.rnn(token_embeddings, hidden)
             logits = self.fc(output[:, -1, :])
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
@@ -96,7 +134,7 @@ def estimate_loss():
     return out
 
 
-model = RNNLanguageModel(vocab_size=vocab_size, embed_size=embed_size, hidden_size=hidden_size)
+model = RNNLanguageModel()
 model = model.to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
