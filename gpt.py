@@ -6,13 +6,15 @@ from torch.nn import functional as F
 
 batch_size = 32
 block_size = 8
-embed_size = 32
-hidden_size = 64
-learning_rate = 0.001
+num_embed = 32
+learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 max_iters = 3000
 eval_interval = 50
 eval_iters = 200
+num_head = 4
+num_layer = 4
+dropout = 0.2
 
 # -------------
 
@@ -49,10 +51,12 @@ class Head(nn.Module):
     # Each token emits 3 vectors: a key, a query, and a value
     def __init__(self, head_size):
         super().__init__()
-        self.key = nn.Linear(embed_size, head_size, bias=False)
-        self.query = nn.Linear(embed_size, head_size, bias=False)
-        self.value = nn.Linear(embed_size, head_size, bias=False)
+        self.key = nn.Linear(num_embed, head_size, bias=False)
+        self.query = nn.Linear(num_embed, head_size, bias=False)
+        self.value = nn.Linear(num_embed, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # Lower-triangular matrix
+
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B,T,C = x.shape
@@ -75,36 +79,66 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(num_heads * head_size, num_embed)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
 
+class FeedForward(nn.Module):
+    """ A simple linear layer followed by a non-linearity """
 
-class RNNLanguageModel(nn.Module):
+    def __init__(self, num_embed):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(num_embed, 4 * num_embed),
+            nn.ReLU(),
+            nn.Linear(4 * num_embed, num_embed), # projection layer that goes back into the residual pathway
+            nn.Dropout(dropout),
+        )
+    
+    def forward(self, x):
+        return self.net(x)
+
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
+
+    def __init__(self, num_embed, num_head):
+        super().__init__()
+        head_size = num_embed // num_head
+        self.sa = MultiHeadAttention(num_head, head_size) # communication
+        self.ffwd = FeedForward(num_embed) # computation
+        self.ln1 = nn.LayerNorm(num_embed)
+        self.ln2 = nn.LayerNorm(num_embed)
+
+    def forward(self, x):
+        x = x + self.sa(x)
+        x = x + self.ffwd(x)
+        return x
+
+class BigramLanguageModel(nn.Module):
     def __init__(self, num_layers=1):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, embed_size)
-        self.position_embedding_table = nn.Embedding(block_size, embed_size)
-        self.rnn = nn.LSTM(embed_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, vocab_size)
-        self.sa_heads = MultiHeadAttention(4, embed_size//4) # 4 heads of 8-dimensional self-attention = 32 (embed_size)
-        self.lm_head = nn.Linear(embed_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, num_embed)
+        self.position_embedding_table = nn.Embedding(block_size, num_embed)
+        self.blocks = nn.Sequential(*[Block(num_embed, num_head=num_head) for _ in range(num_layer)])
+        self.ln_f = nn.LayerNorm(num_embed)
+        self.lm_head = nn.Linear(num_embed, vocab_size)
     
     def forward(self, idx, targets=None):
         B, T = idx.shape
 
-        tok_emb = self.token_embedding_table(idx) # (B, T, embed_size)
+        tok_emb = self.token_embedding_table(idx) # (B, T, num_embed)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T, C)
         x = tok_emb + pos_emb # (B, T, C)
-
-        attn_out = self.sa_heads(x)
-        x = x + attn_out
-        output, _ = self.rnn(x)
-        
-        logits = self.fc(output) # (B, T, vocab_size)
+        x = self.blocks(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
 
         loss = None
         if targets is not None:
+            B,T,C = logits.shape
             logits = logits.view(-1, logits.size(-1))
             targets = targets.view(-1)
             loss = F.cross_entropy(logits, targets)
@@ -113,12 +147,17 @@ class RNNLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         hidden = None
         for _ in range(max_new_tokens):
-            token_embeddings = self.token_embedding_table(idx[:, -block_size:])
-            output, hidden = self.rnn(token_embeddings, hidden)
-            logits = self.fc(output[:, -1, :])
-            probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
+            idx_cond = idx[:, -block_size:]
+            # get the predictions
+            logits, loss = self(idx_cond)
+            # focus only on the last time step
+            logits = logits[:, -1, :] # becomes (B, C)
+            # apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1) # (B, C)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            # append sampled index to the running sequence
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
 def get_batch(split):
@@ -144,7 +183,7 @@ def estimate_loss():
     return out
 
 
-model = RNNLanguageModel()
+model = BigramLanguageModel()
 model = model.to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
