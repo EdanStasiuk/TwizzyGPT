@@ -205,5 +205,10 @@ print(f"Logits shape: {logits.shape}, Loss: {loss.item()}")
 
 # Generate text from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-generated_idx = model.generate(idx=torch.zeros((1, 1), dtype=torch.long), max_new_tokens=500)
-print(decode(generated_idx[0].tolist()))
+generated_idx = model.generate(idx=torch.zeros((1, 1), dtype=torch.long), max_new_tokens=1500)
+generated_text = decode(generated_idx[0].tolist())
+print(generated_text)
+
+# Save the generated text to a file
+with open('generated_text.txt', 'w', encoding='utf-8') as f:
+    f.write(generated_text)
